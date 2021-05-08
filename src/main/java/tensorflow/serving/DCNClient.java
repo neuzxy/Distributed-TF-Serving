@@ -23,7 +23,8 @@ import java.util.stream.LongStream;
 public class DCNClient {
 
     private static final int FIELD_NUM = 43;
-
+    
+    private static final boolean isFullAsyncMode = true; 
     private static final int port = 9999;
     private static final int candidateNum = 1500;
     private static final int requestNum = 1000;
@@ -32,6 +33,7 @@ public class DCNClient {
     private static final String modelName = "DCN";
     private static final String modelSignature = "serving_default";
     private static final String outputKey = "prediction_node";
+    
 
     private static final List<String> hostsList = Arrays.asList("9.91.21.26", "9.91.21.28", "9.91.21.29");
 
@@ -141,53 +143,54 @@ public class DCNClient {
         List<Float> fullCtrList = new ArrayList<>();
         final int taskNum = hostsList.size();
 
+        if (isFullAsyncMode) {
+            List<CompletableFuture<Predict.PredictResponse>> futureList = new ArrayList<>();
+            for (int i = 0; i < taskNum; i++) {
+                final int idx = i;
+                futureList.add(
+                        CompletableFuture.supplyAsync(
+                                () -> sendRequest(channelList.get(idx), featIdsList.get(idx), featWtsList.get(idx), modelSpec),
+                                threadPool
+                        )
+                );
+            }
 
-        List<CompletableFuture<Predict.PredictResponse>> futureList = new ArrayList<>();
-        for (int i = 0; i < taskNum; i++) {
-            final int idx = i;
-            futureList.add(
-                    CompletableFuture.supplyAsync(
-                            () -> sendRequest(channelList.get(idx), featIdsList.get(idx), featWtsList.get(idx), modelSpec),
-                            threadPool
-                    )
-            );
+            List<Predict.PredictResponse> responseList =
+                    futureList.stream().map(CompletableFuture::join).collect(Collectors.toList());
+
+            for (int i = 0; i < taskNum; i++) {
+                List<Float> ctrList = responseList.get(i).getOutputsMap().get(outputKey).getFloatValList();
+                fullCtrList.addAll(ctrList);
+            }
+        } else {
+           Callable[] tasks = new Callable[taskNum];
+           Future[] futures = new Future[taskNum];
+           for (int i = 0; i < taskNum; i++) {
+               final int idx = i;
+               tasks[idx] = () -> sendRequest(channelList.get(idx), featIdsList.get(idx), featWtsList.get(idx), modelSpec);
+               futures[idx] = threadPool.submit(tasks[idx]);
+           }
+
+
+           List<Integer> doneTaskList = new ArrayList<>();
+           while (doneTaskList.size() < taskNum) {
+               for (int i = 0; i < taskNum; i++) {
+                   if (!doneTaskList.contains(i) && futures[i].isDone()) {
+                       doneTaskList.add(i);
+                       Predict.PredictResponse response = null;
+                       try {
+                           response = (Predict.PredictResponse) futures[i].get();
+                           List<Float> ctrList = response.getOutputsMap().get(outputKey).getFloatValList();
+                           fullCtrList.addAll(ctrList);
+                       } catch (InterruptedException | ExecutionException e) {
+                           e.printStackTrace();
+                           return;
+                       }
+                   }
+
+               }
+           }
         }
-
-        List<Predict.PredictResponse> responseList =
-                futureList.stream().map(CompletableFuture::join).collect(Collectors.toList());
-
-        for (int i = 0; i < taskNum; i++) {
-            List<Float> ctrList = responseList.get(i).getOutputsMap().get(outputKey).getFloatValList();
-            fullCtrList.addAll(ctrList);
-        }
-
-//        Callable[] tasks = new Callable[taskNum];
-//        Future[] futures = new Future[taskNum];
-//        for (int i = 0; i < taskNum; i++) {
-//            final int idx = i;
-//            tasks[idx] = () -> sendRequest(channelList.get(idx), featIdsList.get(idx), featWtsList.get(idx), modelSpec);
-//            futures[idx] = threadPool.submit(tasks[idx]);
-//        }
-//
-
-//        List<Integer> doneTaskList = new ArrayList<>();
-//        while (doneTaskList.size() < taskNum) {
-//            for (int i = 0; i < taskNum; i++) {
-//                if (!doneTaskList.contains(i) && futures[i].isDone()) {
-//                    doneTaskList.add(i);
-//                    Predict.PredictResponse response = null;
-//                    try {
-//                        response = (Predict.PredictResponse) futures[i].get();
-//                        List<Float> ctrList = response.getOutputsMap().get(outputKey).getFloatValList();
-//                        fullCtrList.addAll(ctrList);
-//                    } catch (InterruptedException | ExecutionException e) {
-//                        e.printStackTrace();
-//                        return;
-//                    }
-//                }
-//
-//            }
-//        }
 
         Collections.sort(fullCtrList);
 
